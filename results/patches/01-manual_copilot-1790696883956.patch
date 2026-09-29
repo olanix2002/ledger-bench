@@ -1,0 +1,181 @@
+diff --git a/src/app.ts b/src/app.ts
+index b4c8120..8e5e670 100644
+--- a/src/app.ts
++++ b/src/app.ts
+@@ -22,7 +22,7 @@ export function createApp(db: DB) {
+ 
+   app.post("/transfers", (req, res) => {
+     const { from_account, to_account, amount_cents } = req.body ?? {};
+-    res.status(201).json(ledger.transfer(from_account, to_account, amount_cents));
++    res.status(201).json(ledger.transfer(from_account, to_account, amount_cents, req.get("Idempotency-Key")));
+   });
+ 
+   app.use((err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+diff --git a/src/db.ts b/src/db.ts
+index 8f69177..e3fafe2 100644
+--- a/src/db.ts
++++ b/src/db.ts
+@@ -19,6 +19,14 @@ export function openDb(path = ":memory:"): DB {
+       amount_cents INTEGER NOT NULL CHECK (amount_cents > 0),
+       created_at TEXT NOT NULL DEFAULT (datetime('now'))
+     );
++    CREATE TABLE IF NOT EXISTS transfer_idempotency (
++      from_account TEXT NOT NULL REFERENCES accounts(id),
++      idempotency_key TEXT NOT NULL,
++      to_account TEXT NOT NULL REFERENCES accounts(id),
++      amount_cents INTEGER NOT NULL CHECK (amount_cents > 0),
++      transfer_id TEXT NOT NULL UNIQUE REFERENCES transfers(id),
++      PRIMARY KEY (from_account, idempotency_key)
++    );
+   `);
+   return db;
+ }
+diff --git a/src/ledger.ts b/src/ledger.ts
+index 44c6063..2c3e120 100644
+--- a/src/ledger.ts
++++ b/src/ledger.ts
+@@ -42,12 +42,27 @@ export class Ledger {
+     return row;
+   }
+ 
+-  transfer(from: string, to: string, amountCents: number): Transfer {
++  transfer(from: string, to: string, amountCents: number, idempotencyKey?: string): Transfer {
+     if (!Number.isInteger(amountCents) || amountCents <= 0)
+       throw new LedgerError("invalid_amount", "amount must be a positive integer (cents)");
+     if (from === to) throw new LedgerError("same_account", "cannot transfer to the same account");
+ 
+     return tx(this.db, () => {
++      if (idempotencyKey !== undefined) {
++        const previous = this.db
++          .prepare(
++            "SELECT to_account, amount_cents, transfer_id FROM transfer_idempotency WHERE from_account = ? AND idempotency_key = ?"
++          )
++          .get(from, idempotencyKey) as
++          | { to_account: string; amount_cents: number; transfer_id: string }
++          | undefined;
++        if (previous) {
++          if (previous.to_account !== to || previous.amount_cents !== amountCents)
++            throw new LedgerError("idempotency_key_conflict", "idempotency key was already used for a different transfer", 409);
++          return this.db.prepare("SELECT * FROM transfers WHERE id = ?").get(previous.transfer_id) as unknown as Transfer;
++        }
++      }
++
+       const src = this.getAccount(from);
+       this.getAccount(to);
+       if (src.balance_cents < amountCents)
+@@ -58,7 +73,15 @@ export class Ledger {
+       this.db
+         .prepare("INSERT INTO transfers (id, from_account, to_account, amount_cents) VALUES (?, ?, ?, ?)")
+         .run(id, from, to, amountCents);
+-      return this.db.prepare("SELECT * FROM transfers WHERE id = ?").get(id) as unknown as Transfer;
++      const transfer = this.db.prepare("SELECT * FROM transfers WHERE id = ?").get(id) as unknown as Transfer;
++      if (idempotencyKey !== undefined) {
++        this.db
++          .prepare(
++            "INSERT INTO transfer_idempotency (from_account, idempotency_key, to_account, amount_cents, transfer_id) VALUES (?, ?, ?, ?, ?)"
++          )
++          .run(from, idempotencyKey, to, amountCents, id);
++      }
++      return transfer;
+     });
+   }
+ 
+diff --git a/tests/idempotency.test.ts b/tests/idempotency.test.ts
+new file mode 100644
+index 0000000..34f9b42
+--- /dev/null
++++ b/tests/idempotency.test.ts
+@@ -0,0 +1,92 @@
++import { beforeEach, describe, expect, it } from "vitest";
++import request from "supertest";
++import { openDb, type DB } from "../src/db.js";
++import { createApp } from "../src/app.js";
++
++let db: DB;
++let app: ReturnType<typeof createApp>;
++
++beforeEach(() => {
++  db = openDb();
++  app = createApp(db);
++});
++
++async function mk(owner: string, cents: number) {
++  const response = await request(app).post("/accounts").send({ owner, initial_balance_cents: cents });
++  return response.body as { id: string; balance_cents: number };
++}
++
++describe("transfer idempotency", () => {
++  it("returns the original transfer for a repeated key and body", async () => {
++    const source = await mk("ada", 1000);
++    const destination = await mk("bola", 0);
++    const body = { from_account: source.id, to_account: destination.id, amount_cents: 400 };
++
++    const first = await request(app).post("/transfers").set("Idempotency-Key", "payment-1").send(body);
++    const retry = await request(app).post("/transfers").set("Idempotency-Key", "payment-1").send(body);
++
++    expect(first.status).toBe(201);
++    expect(retry.status).toBe(first.status);
++    expect(retry.body).toEqual(first.body);
++    expect((await request(app).get(`/accounts/${source.id}`)).body.balance_cents).toBe(600);
++    expect((await request(app).get(`/accounts/${destination.id}`)).body.balance_cents).toBe(400);
++  });
++
++  it("rejects reusing a key with a different destination or amount", async () => {
++    const source = await mk("ada", 1000);
++    const destination = await mk("bola", 0);
++    const otherDestination = await mk("chen", 0);
++    const key = "payment-1";
++
++    const first = await request(app)
++      .post("/transfers")
++      .set("Idempotency-Key", key)
++      .send({ from_account: source.id, to_account: destination.id, amount_cents: 200 });
++    const differentAmount = await request(app)
++      .post("/transfers")
++      .set("Idempotency-Key", key)
++      .send({ from_account: source.id, to_account: destination.id, amount_cents: 300 });
++    const differentDestination = await request(app)
++      .post("/transfers")
++      .set("Idempotency-Key", key)
++      .send({ from_account: source.id, to_account: otherDestination.id, amount_cents: 200 });
++
++    expect(first.status).toBe(201);
++    expect(differentAmount.status).toBe(409);
++    expect(differentDestination.status).toBe(409);
++    expect((await request(app).get(`/accounts/${source.id}`)).body.balance_cents).toBe(800);
++    expect((await request(app).get(`/accounts/${destination.id}`)).body.balance_cents).toBe(200);
++    expect((await request(app).get(`/accounts/${otherDestination.id}`)).body.balance_cents).toBe(0);
++  });
++
++  it("does not reserve a key when the first attempt fails", async () => {
++    const source = await mk("ada", 50);
++    const destination = await mk("bola", 0);
++    const body = { from_account: source.id, to_account: destination.id, amount_cents: 100 };
++
++    const failed = await request(app).post("/transfers").set("Idempotency-Key", "payment-1").send(body);
++    db.prepare("UPDATE accounts SET balance_cents = 150 WHERE id = ?").run(source.id);
++    const retry = await request(app).post("/transfers").set("Idempotency-Key", "payment-1").send(body);
++
++    expect(failed.status).toBe(409);
++    expect(retry.status).toBe(201);
++    expect((await request(app).get(`/accounts/${source.id}`)).body.balance_cents).toBe(50);
++    expect((await request(app).get(`/accounts/${destination.id}`)).body.balance_cents).toBe(100);
++  });
++
++  it("scopes keys to the source account", async () => {
++    const sourceA = await mk("ada", 300);
++    const sourceB = await mk("bela", 300);
++    const destination = await mk("chen", 0);
++    const body = (source: string) => ({ from_account: source, to_account: destination.id, amount_cents: 200 });
++
++    const first = await request(app).post("/transfers").set("Idempotency-Key", "shared-key").send(body(sourceA.id));
++    const second = await request(app).post("/transfers").set("Idempotency-Key", "shared-key").send(body(sourceB.id));
++
++    expect(first.status).toBe(201);
++    expect(second.status).toBe(201);
++    expect((await request(app).get(`/accounts/${sourceA.id}`)).body.balance_cents).toBe(100);
++    expect((await request(app).get(`/accounts/${sourceB.id}`)).body.balance_cents).toBe(100);
++    expect((await request(app).get(`/accounts/${destination.id}/transfers`)).body).toHaveLength(2);
++  });
++});
+\ No newline at end of file
