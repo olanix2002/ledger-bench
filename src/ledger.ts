@@ -49,10 +49,10 @@ export class Ledger {
     if (from === to) throw new LedgerError("same_account", "cannot transfer to the same account");
 
     const requestHash = `${from}|${to}|${amountCents}`;
-    const src = this.getAccount(from);
-    const dst = this.getAccount(to);
+    const pre = this.getAccount(from);
+    this.getAccount(to);
 
-    const verdict = await this.risk.assess({ from, to, amountCents, sourceBalanceCents: src.balance_cents });
+    const verdict = await this.risk.assess({ from, to, amountCents, sourceBalanceCents: pre.balance_cents });
     if (!verdict.allow)
       throw new LedgerError("transfer_blocked", verdict.reason ?? "blocked by risk check", 403);
 
@@ -67,10 +67,12 @@ export class Ledger {
           return JSON.parse(seen.response_json) as unknown as Transfer;
         }
       }
+      const src = this.getAccount(from);
+      this.getAccount(to);
       if (src.balance_cents < amountCents)
         throw new LedgerError("insufficient_funds", "insufficient funds", 409);
-      this.db.prepare("UPDATE accounts SET balance_cents = ? WHERE id = ?").run(src.balance_cents - amountCents, from);
-      this.db.prepare("UPDATE accounts SET balance_cents = ? WHERE id = ?").run(dst.balance_cents + amountCents, to);
+      this.db.prepare("UPDATE accounts SET balance_cents = balance_cents - ? WHERE id = ?").run(amountCents, from);
+      this.db.prepare("UPDATE accounts SET balance_cents = balance_cents + ? WHERE id = ?").run(amountCents, to);
       const id = randomUUID();
       this.db
         .prepare("INSERT INTO transfers (id, from_account, to_account, amount_cents) VALUES (?, ?, ?, ?)")
