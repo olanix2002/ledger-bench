@@ -1,11 +1,10 @@
-import Database from "better-sqlite3";
+import { DatabaseSync } from "node:sqlite";
 
-export type DB = Database.Database;
+export type DB = DatabaseSync;
 
 export function openDb(path = ":memory:"): DB {
-  const db = new Database(path);
-  db.pragma("journal_mode = WAL");
-  db.pragma("foreign_keys = ON");
+  const db = new DatabaseSync(path);
+  db.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;");
   db.exec(`
     CREATE TABLE IF NOT EXISTS accounts (
       id TEXT PRIMARY KEY,
@@ -22,4 +21,17 @@ export function openDb(path = ":memory:"): DB {
     );
   `);
   return db;
+}
+
+/** Run fn inside an immediate transaction; roll back if it throws. */
+export function tx<T>(db: DB, fn: () => T): T {
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const result = fn();
+    db.exec("COMMIT");
+    return result;
+  } catch (err) {
+    db.exec("ROLLBACK");
+    throw err;
+  }
 }

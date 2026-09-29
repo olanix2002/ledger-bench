@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { DB } from "./db.js";
+import { tx, type DB } from "./db.js";
 
 export class LedgerError extends Error {
   constructor(public code: string, message: string, public status = 400) {
@@ -37,7 +37,7 @@ export class Ledger {
   }
 
   getAccount(id: string): Account {
-    const row = this.db.prepare("SELECT * FROM accounts WHERE id = ?").get(id) as Account | undefined;
+    const row = this.db.prepare("SELECT * FROM accounts WHERE id = ?").get(id) as unknown as Account | undefined;
     if (!row) throw new LedgerError("account_not_found", `account ${id} not found`, 404);
     return row;
   }
@@ -47,7 +47,7 @@ export class Ledger {
       throw new LedgerError("invalid_amount", "amount must be a positive integer (cents)");
     if (from === to) throw new LedgerError("same_account", "cannot transfer to the same account");
 
-    const run = this.db.transaction(() => {
+    return tx(this.db, () => {
       const src = this.getAccount(from);
       this.getAccount(to);
       if (src.balance_cents < amountCents)
@@ -58,9 +58,8 @@ export class Ledger {
       this.db
         .prepare("INSERT INTO transfers (id, from_account, to_account, amount_cents) VALUES (?, ?, ?, ?)")
         .run(id, from, to, amountCents);
-      return this.db.prepare("SELECT * FROM transfers WHERE id = ?").get(id) as Transfer;
+      return this.db.prepare("SELECT * FROM transfers WHERE id = ?").get(id) as unknown as Transfer;
     });
-    return run();
   }
 
   listTransfers(accountId: string): Transfer[] {
@@ -69,6 +68,6 @@ export class Ledger {
       .prepare(
         "SELECT * FROM transfers WHERE from_account = ? OR to_account = ? ORDER BY created_at, rowid"
       )
-      .all(accountId, accountId) as Transfer[];
+      .all(accountId, accountId) as unknown as Transfer[];
   }
 }
