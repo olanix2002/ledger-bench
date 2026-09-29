@@ -1,0 +1,135 @@
+diff --git a/src/ledger.ts b/src/ledger.ts
+index 78e1d5b..528ad1f 100644
+--- a/src/ledger.ts
++++ b/src/ledger.ts
+@@ -67,10 +67,16 @@ export class Ledger {
+           return JSON.parse(seen.response_json) as unknown as Transfer;
+         }
+       }
+-      if (src.balance_cents < amountCents)
++      const currentSrc = this.getAccount(from);
++      const currentDst = this.getAccount(to);
++      if (currentSrc.balance_cents < amountCents)
+         throw new LedgerError("insufficient_funds", "insufficient funds", 409);
+-      this.db.prepare("UPDATE accounts SET balance_cents = ? WHERE id = ?").run(src.balance_cents - amountCents, from);
+-      this.db.prepare("UPDATE accounts SET balance_cents = ? WHERE id = ?").run(dst.balance_cents + amountCents, to);
++      this.db
++        .prepare("UPDATE accounts SET balance_cents = ? WHERE id = ?")
++        .run(currentSrc.balance_cents - amountCents, from);
++      this.db
++        .prepare("UPDATE accounts SET balance_cents = ? WHERE id = ?")
++        .run(currentDst.balance_cents + amountCents, to);
+       const id = randomUUID();
+       this.db
+         .prepare("INSERT INTO transfers (id, from_account, to_account, amount_cents) VALUES (?, ?, ?, ?)")
+diff --git a/tests/concurrency.test.ts b/tests/concurrency.test.ts
+new file mode 100644
+index 0000000..80aeb00
+--- /dev/null
++++ b/tests/concurrency.test.ts
+@@ -0,0 +1,104 @@
++import { beforeEach, describe, expect, it } from "vitest";
++import request from "supertest";
++import { openDb, type DB } from "../src/db.js";
++import { createApp } from "../src/app.js";
++import type { RiskCheck } from "../src/risk.js";
++
++let app: ReturnType<typeof createApp>;
++let db: DB;
++
++beforeEach(() => {
++  db = openDb();
++  app = createApp(db);
++});
++
++async function createAccount(owner: string, cents: number) {
++  const response = await request(app)
++    .post("/accounts")
++    .send({ owner, initial_balance_cents: cents });
++  return response.body as { id: string; balance_cents: number };
++}
++
++describe("concurrent transfers", () => {
++  it("declines a competing debit when only one transfer fits", async () => {
++    const source = await createAccount("source", 1000);
++    const recipient = await createAccount("recipient", 0);
++
++    const responses = await Promise.all([
++      request(app)
++        .post("/transfers")
++        .send({ from_account: source.id, to_account: recipient.id, amount_cents: 600 }),
++      request(app)
++        .post("/transfers")
++        .send({ from_account: source.id, to_account: recipient.id, amount_cents: 600 }),
++    ]);
++
++    expect(responses.map(({ status }) => status).sort()).toEqual([201, 409]);
++    expect(responses.find(({ status }) => status === 409)?.body.error).toBe("insufficient_funds");
++
++    const [sourceAccount, recipientAccount, sourceHistory, recipientHistory] = await Promise.all([
++      request(app).get(`/accounts/${source.id}`),
++      request(app).get(`/accounts/${recipient.id}`),
++      request(app).get(`/accounts/${source.id}/transfers`),
++      request(app).get(`/accounts/${recipient.id}/transfers`),
++    ]);
++    expect(sourceAccount.body.balance_cents).toBe(400);
++    expect(recipientAccount.body.balance_cents).toBe(600);
++    expect(sourceHistory.body).toHaveLength(1);
++    expect(recipientHistory.body).toHaveLength(1);
++    expect(sourceHistory.body[0].amount_cents).toBe(600);
++    expect(sourceAccount.body.balance_cents + recipientAccount.body.balance_cents).toBe(1000);
++  });
++
++  it("does not lose simultaneous credits to a shared recipient", async () => {
++    const firstSource = await createAccount("first", 300);
++    const secondSource = await createAccount("second", 300);
++    const recipient = await createAccount("recipient", 0);
++
++    const responses = await Promise.all([
++      request(app)
++        .post("/transfers")
++        .send({ from_account: firstSource.id, to_account: recipient.id, amount_cents: 200 }),
++      request(app)
++        .post("/transfers")
++        .send({ from_account: secondSource.id, to_account: recipient.id, amount_cents: 200 }),
++    ]);
++
++    expect(responses.map(({ status }) => status)).toEqual([201, 201]);
++    const [first, second, destination, history] = await Promise.all([
++      request(app).get(`/accounts/${firstSource.id}`),
++      request(app).get(`/accounts/${secondSource.id}`),
++      request(app).get(`/accounts/${recipient.id}`),
++      request(app).get(`/accounts/${recipient.id}/transfers`),
++    ]);
++    expect(first.body.balance_cents).toBe(100);
++    expect(second.body.balance_cents).toBe(100);
++    expect(destination.body.balance_cents).toBe(400);
++    expect(history.body).toHaveLength(2);
++    expect(first.body.balance_cents + second.body.balance_cents + destination.body.balance_cents).toBe(600);
++  });
++
++  it("runs risk screening and leaves no history or balance changes when blocked", async () => {
++    let riskCalls = 0;
++    const risk: RiskCheck = {
++      async assess() {
++        riskCalls += 1;
++        return { allow: false, reason: "blocked" };
++      },
++    };
++    app = createApp(db, { risk });
++    const source = await createAccount("source", 500);
++    const recipient = await createAccount("recipient", 0);
++
++    const response = await request(app)
++      .post("/transfers")
++      .send({ from_account: source.id, to_account: recipient.id, amount_cents: 100 });
++
++    expect(riskCalls).toBe(1);
++    expect(response.status).toBe(403);
++    expect(response.body.error).toBe("transfer_blocked");
++    expect((await request(app).get(`/accounts/${source.id}`)).body.balance_cents).toBe(500);
++    expect((await request(app).get(`/accounts/${recipient.id}`)).body.balance_cents).toBe(0);
++    expect((await request(app).get(`/accounts/${source.id}/transfers`)).body).toHaveLength(0);
++  });
++});
+\ No newline at end of file
