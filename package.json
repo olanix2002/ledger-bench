@@ -5,7 +5,9 @@
   "scripts": {
     "test": "vitest run",
     "dev": "tsx src/server.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "bench": "tsx harness/run.ts",
+    "report": "tsx harness/report.ts"
   },
   "keywords": [],
   "author": "",

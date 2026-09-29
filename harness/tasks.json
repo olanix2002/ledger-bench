@@ -1,0 +1,12 @@
+{
+  "01": {
+    "ref": "master",
+    "issue": "tasks/01-idempotency-keys/issue.md",
+    "hidden": ["tasks/01-idempotency-keys/hidden"]
+  },
+  "02": {
+    "ref": "task/02-start",
+    "issue": "tasks/02-concurrent-transfers/issue.md",
+    "hidden": ["tasks/01-idempotency-keys/hidden", "tasks/02-concurrent-transfers/hidden"]
+  }
+}

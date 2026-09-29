@@ -1,0 +1,29 @@
+{
+  "noop": {
+    "type": "noop"
+  },
+  "claude-code": {
+    "type": "command",
+    "cmd": "claude -p --dangerously-skip-permissions",
+    "stdin": true,
+    "timeoutMin": 25
+  },
+  "aider": {
+    "type": "command",
+    "cmd": "aider --yes-always --no-auto-commits --message-file {promptFile}",
+    "stdin": false,
+    "timeoutMin": 25
+  },
+  "selfcheck-tamper": {
+    "type": "command",
+    "cmd": "node -e \"require('fs').writeFileSync('tests/baseline.test.ts','');require('fs').rmSync('tests',{recursive:true})\"",
+    "stdin": false,
+    "timeoutMin": 2
+  },
+  "selfcheck-ls": {
+    "type": "command",
+    "cmd": "node -e \"const fs=require('fs');console.log(fs.readdirSync('.').join(' '));console.log('has tasks dir:',fs.existsSync('tasks'));console.log('git commits:',require('child_process').execSync('git log --oneline').toString().trim().split('\\n').length)\"",
+    "stdin": false,
+    "timeoutMin": 2
+  }
+}
