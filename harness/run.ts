@@ -13,6 +13,7 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import readline from "node:readline/promises";
 
 const repo = process.cwd();
 const GIT_ID = ["-c", "user.name=harness", "-c", "user.email=harness@example.com"];
@@ -86,6 +87,14 @@ let timedOut = false;
 let agentLog = "";
 if (agentName === "noop") {
   agentLog = "noop agent: no changes";
+} else if (agentName.startsWith("manual")) {
+  console.log(`\nWorkspace: ${work}\nPrompt:    ${promptFile}`);
+  console.log("Open the workspace folder in your editor or agent, give it the prompt, let it finish,");
+  console.log("then come back here and press Enter to grade.");
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  await rl.question("Press Enter when the agent is done: ");
+  rl.close();
+  agentLog = "manual run";
 } else if (agentName.startsWith("reference:")) {
   const refDir = checkout(agentName.slice("reference:".length), "reference");
   fs.rmSync(path.join(work, "src"), { recursive: true, force: true });
@@ -114,6 +123,8 @@ run("git", ["add", "-A"], work);
 const changed = run("git", ["diff", "--cached", "--name-only"], work).stdout.split("\n").filter(Boolean);
 const testsTouched = changed.filter((f) => f.startsWith("tests/"));
 const diffLines = run("git", ["diff", "--cached", "--shortstat"], work).stdout.trim();
+fs.mkdirSync(path.join(repo, "results/patches"), { recursive: true });
+fs.writeFileSync(path.join(repo, "results/patches", `${runId}.patch`), run("git", ["diff", "--cached"], work).stdout);
 
 // 4. Grade against pristine visible tests plus hidden tests.
 fs.rmSync(path.join(work, "tests"), { recursive: true, force: true });
