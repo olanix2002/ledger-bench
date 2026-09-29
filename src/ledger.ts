@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { tx, type DB } from "./db.js";
+import { DefaultRiskCheck, type RiskCheck } from "./risk.js";
 
 export class LedgerError extends Error {
   constructor(public code: string, message: string, public status = 400) {
@@ -23,7 +24,7 @@ export interface Transfer {
 }
 
 export class Ledger {
-  constructor(private db: DB) {}
+  constructor(private db: DB, private risk: RiskCheck = new DefaultRiskCheck()) {}
 
   createAccount(owner: string, initialCents = 0): Account {
     if (!owner) throw new LedgerError("invalid_owner", "owner is required");
@@ -42,12 +43,19 @@ export class Ledger {
     return row;
   }
 
-  transfer(from: string, to: string, amountCents: number, idempotencyKey?: string): Transfer {
+  async transfer(from: string, to: string, amountCents: number, idempotencyKey?: string): Promise<Transfer> {
     if (!Number.isInteger(amountCents) || amountCents <= 0)
       throw new LedgerError("invalid_amount", "amount must be a positive integer (cents)");
     if (from === to) throw new LedgerError("same_account", "cannot transfer to the same account");
 
     const requestHash = `${from}|${to}|${amountCents}`;
+    const src = this.getAccount(from);
+    const dst = this.getAccount(to);
+
+    const verdict = await this.risk.assess({ from, to, amountCents, sourceBalanceCents: src.balance_cents });
+    if (!verdict.allow)
+      throw new LedgerError("transfer_blocked", verdict.reason ?? "blocked by risk check", 403);
+
     return tx(this.db, () => {
       if (idempotencyKey) {
         const seen = this.db
@@ -59,12 +67,10 @@ export class Ledger {
           return JSON.parse(seen.response_json) as unknown as Transfer;
         }
       }
-      const src = this.getAccount(from);
-      this.getAccount(to);
       if (src.balance_cents < amountCents)
         throw new LedgerError("insufficient_funds", "insufficient funds", 409);
-      this.db.prepare("UPDATE accounts SET balance_cents = balance_cents - ? WHERE id = ?").run(amountCents, from);
-      this.db.prepare("UPDATE accounts SET balance_cents = balance_cents + ? WHERE id = ?").run(amountCents, to);
+      this.db.prepare("UPDATE accounts SET balance_cents = ? WHERE id = ?").run(src.balance_cents - amountCents, from);
+      this.db.prepare("UPDATE accounts SET balance_cents = ? WHERE id = ?").run(dst.balance_cents + amountCents, to);
       const id = randomUUID();
       this.db
         .prepare("INSERT INTO transfers (id, from_account, to_account, amount_cents) VALUES (?, ?, ?, ?)")

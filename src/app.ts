@@ -1,9 +1,10 @@
 import express from "express";
 import type { DB } from "./db.js";
 import { Ledger, LedgerError } from "./ledger.js";
+import type { RiskCheck } from "./risk.js";
 
-export function createApp(db: DB) {
-  const ledger = new Ledger(db);
+export function createApp(db: DB, opts: { risk?: RiskCheck } = {}) {
+  const ledger = new Ledger(db, opts.risk);
   const app = express();
   app.use(express.json());
 
@@ -20,9 +21,9 @@ export function createApp(db: DB) {
     res.json(ledger.listTransfers(req.params.id));
   });
 
-  app.post("/transfers", (req, res) => {
+  app.post("/transfers", async (req, res) => {
     const { from_account, to_account, amount_cents } = req.body ?? {};
-    res.status(201).json(ledger.transfer(from_account, to_account, amount_cents, req.header("Idempotency-Key") || undefined));
+    res.status(201).json(await ledger.transfer(from_account, to_account, amount_cents, req.header("Idempotency-Key") || undefined));
   });
 
   app.use((err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
