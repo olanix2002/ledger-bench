@@ -22,7 +22,7 @@ export function createApp(db: DB) {
 
   app.post("/transfers", (req, res) => {
     const { from_account, to_account, amount_cents } = req.body ?? {};
-    res.status(201).json(ledger.transfer(from_account, to_account, amount_cents));
+    res.status(201).json(ledger.transfer(from_account, to_account, amount_cents, req.header("Idempotency-Key") || undefined));
   });
 
   app.use((err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {

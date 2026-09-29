@@ -20,6 +20,13 @@ export function openDb(path = ":memory:"): DB {
       amount_cents INTEGER NOT NULL CHECK (amount_cents > 0),
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
+    CREATE TABLE IF NOT EXISTS idempotency_keys (
+      account_id TEXT NOT NULL,
+      key TEXT NOT NULL,
+      request_hash TEXT NOT NULL,
+      response_json TEXT NOT NULL,
+      PRIMARY KEY (account_id, key)
+    );
   `);
   return db;
 }

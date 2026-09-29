@@ -42,12 +42,23 @@ export class Ledger {
     return row;
   }
 
-  transfer(from: string, to: string, amountCents: number): Transfer {
+  transfer(from: string, to: string, amountCents: number, idempotencyKey?: string): Transfer {
     if (!Number.isInteger(amountCents) || amountCents <= 0)
       throw new LedgerError("invalid_amount", "amount must be a positive integer (cents)");
     if (from === to) throw new LedgerError("same_account", "cannot transfer to the same account");
 
+    const requestHash = `${from}|${to}|${amountCents}`;
     const run = this.db.transaction(() => {
+      if (idempotencyKey) {
+        const seen = this.db
+          .prepare("SELECT request_hash, response_json FROM idempotency_keys WHERE account_id = ? AND key = ?")
+          .get(from, idempotencyKey) as { request_hash: string; response_json: string } | undefined;
+        if (seen) {
+          if (seen.request_hash !== requestHash)
+            throw new LedgerError("idempotency_key_reuse", "key was used with a different request", 422);
+          return JSON.parse(seen.response_json) as Transfer;
+        }
+      }
       const src = this.getAccount(from);
       this.getAccount(to);
       if (src.balance_cents < amountCents)
@@ -58,7 +69,12 @@ export class Ledger {
       this.db
         .prepare("INSERT INTO transfers (id, from_account, to_account, amount_cents) VALUES (?, ?, ?, ?)")
         .run(id, from, to, amountCents);
-      return this.db.prepare("SELECT * FROM transfers WHERE id = ?").get(id) as Transfer;
+      const created = this.db.prepare("SELECT * FROM transfers WHERE id = ?").get(id) as Transfer;
+      if (idempotencyKey)
+        this.db
+          .prepare("INSERT INTO idempotency_keys (account_id, key, request_hash, response_json) VALUES (?, ?, ?, ?)")
+          .run(from, idempotencyKey, requestHash, JSON.stringify(created));
+      return created;
     });
     return run();
   }
