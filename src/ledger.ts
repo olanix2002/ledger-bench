@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { DB } from "./db.js";
+import { tx, type DB } from "./db.js";
 
 export class LedgerError extends Error {
   constructor(public code: string, message: string, public status = 400) {
@@ -37,7 +37,7 @@ export class Ledger {
   }
 
   getAccount(id: string): Account {
-    const row = this.db.prepare("SELECT * FROM accounts WHERE id = ?").get(id) as Account | undefined;
+    const row = this.db.prepare("SELECT * FROM accounts WHERE id = ?").get(id) as unknown as Account | undefined;
     if (!row) throw new LedgerError("account_not_found", `account ${id} not found`, 404);
     return row;
   }
@@ -48,15 +48,15 @@ export class Ledger {
     if (from === to) throw new LedgerError("same_account", "cannot transfer to the same account");
 
     const requestHash = `${from}|${to}|${amountCents}`;
-    const run = this.db.transaction(() => {
+    return tx(this.db, () => {
       if (idempotencyKey) {
         const seen = this.db
           .prepare("SELECT request_hash, response_json FROM idempotency_keys WHERE account_id = ? AND key = ?")
-          .get(from, idempotencyKey) as { request_hash: string; response_json: string } | undefined;
+          .get(from, idempotencyKey) as unknown as { request_hash: string; response_json: string } | undefined;
         if (seen) {
           if (seen.request_hash !== requestHash)
             throw new LedgerError("idempotency_key_reuse", "key was used with a different request", 422);
-          return JSON.parse(seen.response_json) as Transfer;
+          return JSON.parse(seen.response_json) as unknown as Transfer;
         }
       }
       const src = this.getAccount(from);
@@ -69,14 +69,13 @@ export class Ledger {
       this.db
         .prepare("INSERT INTO transfers (id, from_account, to_account, amount_cents) VALUES (?, ?, ?, ?)")
         .run(id, from, to, amountCents);
-      const created = this.db.prepare("SELECT * FROM transfers WHERE id = ?").get(id) as Transfer;
+      const created = this.db.prepare("SELECT * FROM transfers WHERE id = ?").get(id) as unknown as Transfer;
       if (idempotencyKey)
         this.db
           .prepare("INSERT INTO idempotency_keys (account_id, key, request_hash, response_json) VALUES (?, ?, ?, ?)")
           .run(from, idempotencyKey, requestHash, JSON.stringify(created));
       return created;
     });
-    return run();
   }
 
   listTransfers(accountId: string): Transfer[] {
@@ -85,6 +84,6 @@ export class Ledger {
       .prepare(
         "SELECT * FROM transfers WHERE from_account = ? OR to_account = ? ORDER BY created_at, rowid"
       )
-      .all(accountId, accountId) as Transfer[];
+      .all(accountId, accountId) as unknown as Transfer[];
   }
 }
