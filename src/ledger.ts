@@ -43,7 +43,16 @@ export class Ledger {
     return row;
   }
 
-  async transfer(from: string, to: string, amountCents: number, idempotencyKey?: string): Promise<Transfer> {
+  private queue: Promise<unknown> = Promise.resolve();
+
+  /** Transfers run one at a time so each sees the balances left by the previous one. */
+  transfer(from: string, to: string, amountCents: number, idempotencyKey?: string): Promise<Transfer> {
+    const run = this.queue.then(() => this.doTransfer(from, to, amountCents, idempotencyKey));
+    this.queue = run.catch(() => undefined);
+    return run;
+  }
+
+  private async doTransfer(from: string, to: string, amountCents: number, idempotencyKey?: string): Promise<Transfer> {
     if (!Number.isInteger(amountCents) || amountCents <= 0)
       throw new LedgerError("invalid_amount", "amount must be a positive integer (cents)");
     if (from === to) throw new LedgerError("same_account", "cannot transfer to the same account");
